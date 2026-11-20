@@ -108,12 +108,20 @@ class MacroProcessor:
     def __init__(self, user: Optional[Dict[str, str]] = None):
         self.simple = dict(self.BUILTINS)
         self.argm = dict(self.ARG_MACROS)
-        if user:
+        if user and isinstance(user, dict):
             for k, v in user.items():
                 (self.argm if "$1" in v else self.simple)[k] = v
 
     def process(self, source: str) -> str:
         src = source
+        # Luraph-compatible macros
+        for name in ("LPH_NO_VIRTUALIZE", "SKI_NO_VIRTUALIZE", "LPH_JIT", "LPH_JIT_MAX", "SKI_JIT"):
+            src = re.sub(r"\b" + re.escape(name) + r"\s*\(", "(", src)
+        for name in ("LPH_ENCSTR", "LPH_STRENC", "SKI_ENCSTR", "LPH_ENCNUM", "SKI_ENCNUM"):
+            src = re.sub(r"\b" + re.escape(name) + r"\s*\(([^)]*)\)", r"(\1)", src)
+        src = re.sub(r"\b(?:LPH_CRASH|SKI_CRASH)\s*\(\s*\)", "((function() while true do end end)())", src)
+        src = re.sub(r"\bLPH_OBFUSCATED\b", "true", src)
+        src = re.sub(r"\bSKI_OBFUSCATED\b", "true", src)
         for name, tmpl in sorted(self.argm.items(), key=lambda x: -len(x[0])):
             pat = re.compile(rf"\b{re.escape(name)}\s*\(([^)]*)\)", re.DOTALL)
 
@@ -556,12 +564,14 @@ class SkiObfuscator:
         macros: Optional[Dict[str, str]] = None,
         enable_vm: bool = True,
         enable_anti_tamper: bool = True,
+        vm_strength: str = "medium",
     ):
         self.intensity = max(1, min(5, intensity))
         self.target = target if target in ("luau", "lua51", "lua52", "lua53", "lua54") else "luau"
         self.enable_vm = enable_vm
         self.enable_anti_tamper = enable_anti_tamper
-        self.macro_proc = MacroProcessor(macros)
+        self.vm_strength = vm_strength if vm_strength in ("medium","strong") else ("strong" if intensity >= 4 else "medium")
+        self.macro_proc = MacroProcessor(macros if isinstance(macros, dict) else None)
 
     def _strip(self, src: str) -> str:
         src = re.sub(r"--\[\[.*?\]\]", "", src, flags=re.DOTALL)
@@ -649,6 +659,12 @@ pre{background:#12181f;border:1px solid #243041;border-radius:8px;padding:12px;
   <p class="sub">Luraph-grade Luau/Lua obfuscator · random VM · anti-dump/hook</p>
   <textarea id="src" placeholder='print("Hello")'></textarea>
   <div class="row">
+    <label>VM
+      <select id="vm">
+        <option value="medium" selected>medium</option>
+        <option value="strong">strong</option>
+      </select>
+    </label>
     <label>Intensity
       <select id="intensity">
         <option>1</option><option>2</option><option>3</option><option>4</option>
@@ -664,7 +680,9 @@ pre{background:#12181f;border:1px solid #243041;border-radius:8px;padding:12px;
         <option value="lua54">lua54</option>
       </select>
     </label>
-    <button class="primary" onclick="go()">Obfuscate</button>
+    <input type="file" id="file" accept=".lua,.luau,.txt,text/*"/>
+<button class="primary" onclick="go()">Obfuscate</button>
+<button onclick="dl()" id="dlbtn" disabled>Download</button>
   </div>
   <div class="stats" id="stats"></div>
   <pre id="out"></pre>
@@ -673,16 +691,42 @@ pre{background:#12181f;border:1px solid #243041;border-radius:8px;padding:12px;
 async function go(){
   const source=document.getElementById('src').value;
   const intensity=+document.getElementById('intensity').value;
+  const vm_strength=(document.getElementById('vm')||{}).value||'medium';
   const target=document.getElementById('target').value;
-  document.getElementById('out').textContent='...';
-  const r=await fetch('/api/obfuscate',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({source,intensity,target})});
-  const j=await r.json();
-  if(!j.success){document.getElementById('out').textContent=j.detail||'error';return}
-  document.getElementById('out').textContent=j.result;
-  document.getElementById('stats').textContent=
-    `in ${j.stats.original_size} → out ${j.stats.obfuscated_size} bytes · ${j.stats.time_ms}ms · intensity ${j.stats.intensity}`;
+  const out=document.getElementById('out');
+  const stats=document.getElementById('stats');
+  out.textContent='Working...';
+  stats.textContent='';
+  try {
+    const r=await fetch('/api/obfuscate',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({source,intensity,target,vm_strength,enable_vm:true,enable_anti_tamper:true})
+    });
+    const j=await r.json().catch(async()=>({detail:await r.text()}));
+    if(!r.ok || j.success===false){
+      let msg=j.detail;
+      if(msg==null) msg=j.error||j.message||JSON.stringify(j);
+      if(typeof msg!=='string') msg=JSON.stringify(msg,null,2);
+      out.textContent='Error: '+msg;
+      return;
+    }
+    out.textContent=j.result||'';
+    if(j.stats){
+      stats.textContent=`in ${j.stats.original_size} → out ${j.stats.obfuscated_size} bytes · ${j.stats.time_ms}ms · intensity ${j.stats.intensity}`;
+    }
+  } catch(e){
+    out.textContent='Network/JS error: '+(e && e.message ? e.message : String(e));
+  }
 }
+
+let lastResult='';
+const _out=document.getElementById('out');
+const _file=document.getElementById('file');
+if(_file){_file.onchange=async(e)=>{const f=e.target.files[0];if(f)document.getElementById('src').value=await f.text();};}
+function dl(){if(!lastResult)return;const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([lastResult],{type:'text/plain'}));a.download='ski_obfuscated.luau';a.click();}
+const _go=go;
+go=async function(){await _go();const t=document.getElementById('out').textContent;if(t&&!t.startsWith('Error')&&!t.startsWith('Working')&&!t.startsWith('Network')){lastResult=t;const b=document.getElementById('dlbtn');if(b)b.disabled=false;}}
 </script>
 </body>
 </html>
@@ -690,18 +734,53 @@ async function go(){
 
 
 def create_app():
-    from fastapi import FastAPI, HTTPException
-    from fastapi.responses import HTMLResponse
+    from fastapi import FastAPI, HTTPException, Request
+    from fastapi.responses import HTMLResponse, JSONResponse
+    from fastapi.middleware.cors import CORSMiddleware
     from pydantic import BaseModel, Field
 
-    app = FastAPI(title="Ski.win", version="0.9.0")
+    app = FastAPI(title="Ski.win", version="0.9.1")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
 
     class Req(BaseModel):
-        source: str
+        source: str = ""
         intensity: int = Field(5, ge=1, le=5)
         target: str = "luau"
+        vm_strength: str = "medium"
         enable_vm: bool = True
         enable_anti_tamper: bool = True
+
+    def json_dumps(x):
+        import json
+        try:
+            return json.dumps(x, ensure_ascii=False)
+        except Exception:
+            return str(x)
+
+    @app.exception_handler(Exception)
+    async def _any_err(request: Request, exc: Exception):
+        from fastapi.exceptions import RequestValidationError
+        if isinstance(exc, HTTPException):
+            detail = exc.detail
+            if not isinstance(detail, str):
+                detail = json_dumps(detail)
+            return JSONResponse({"success": False, "detail": detail}, status_code=exc.status_code)
+        if isinstance(exc, RequestValidationError):
+            return JSONResponse({"success": False, "detail": json_dumps(exc.errors())}, status_code=422)
+        return JSONResponse({"success": False, "detail": str(exc)}, status_code=500)
+
+    try:
+        from fastapi.exceptions import RequestValidationError
+        @app.exception_handler(RequestValidationError)
+        async def _val_err(request: Request, exc: RequestValidationError):
+            return JSONResponse({"success": False, "detail": json_dumps(exc.errors())}, status_code=422)
+    except Exception:
+        pass
 
     @app.get("/", response_class=HTMLResponse)
     def index():
@@ -710,20 +789,24 @@ def create_app():
     @app.post("/api/obfuscate")
     def api_obfuscate(req: Req):
         if not req.source or len(req.source.strip()) < 2:
-            raise HTTPException(400, "source too short")
+            return JSONResponse({"success": False, "detail": "source too short"}, status_code=400)
         if len(req.source) > 1_500_000:
-            raise HTTPException(400, "source too large")
+            return JSONResponse({"success": False, "detail": "source too large"}, status_code=400)
         t0 = time.time()
         try:
             eng = SkiObfuscator(
                 intensity=req.intensity,
-                target=req.target,
+                target=req.target or "luau",
+                vm_strength=getattr(req,"vm_strength","medium"),
                 enable_vm=req.enable_vm,
                 enable_anti_tamper=req.enable_anti_tamper,
             )
             result = eng.obfuscate(req.source)
         except Exception as e:
-            raise HTTPException(500, f"{type(e).__name__}: {e}")
+            return JSONResponse(
+                {"success": False, "detail": f"{type(e).__name__}: {e}"},
+                status_code=500,
+            )
         return {
             "success": True,
             "result": result,
@@ -738,7 +821,7 @@ def create_app():
 
     @app.get("/health")
     def health():
-        return {"status": "ok", "version": "0.9.0"}
+        return {"status": "ok", "version": "0.9.1"}
 
     return app
 
