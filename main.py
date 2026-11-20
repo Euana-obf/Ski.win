@@ -743,7 +743,12 @@ def create_app():
     return app
 
 
-app = None  # set on server start
+# Lazy app for uvicorn main:app (avoids requiring fastapi for CLI-only use)
+try:
+    app = create_app()
+except Exception:
+    app = None
+
 
 
 # =============================================================================
@@ -763,7 +768,7 @@ def main():
 
     sub.add_parser("serve", help="start web server")
 
-    args, unknown = parser.parse_known_args()
+    args = parser.parse_args()
 
     if args.cmd == "obfuscate":
         src = open(args.input, encoding="utf-8").read()
@@ -779,11 +784,9 @@ def main():
         return
 
     # default / serve → web
-    global app
-    app = create_app()
     import uvicorn
     port = int(os.environ.get("PORT", "8000"))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    uvicorn.run("main:app", host="0.0.0.0", port=port, reload=False)
 
 
 if __name__ == "__main__":
