@@ -734,7 +734,7 @@ go=async function(){await _go();const t=document.getElementById('out').textConte
 
 
 def create_app():
-    from fastapi import FastAPI, HTTPException, Request
+    from fastapi import FastAPI, HTTPException, Request, Body
     from fastapi.responses import HTMLResponse, JSONResponse
     from fastapi.middleware.cors import CORSMiddleware
     from pydantic import BaseModel, Field
@@ -787,35 +787,43 @@ def create_app():
         return INDEX_HTML
 
     @app.post("/api/obfuscate")
-    def api_obfuscate(req: Req):
-        if not req.source or len(req.source.strip()) < 2:
+    async def api_obfuscate(request: Request):
+        try:
+            data = await request.json()
+        except Exception:
+            return JSONResponse({"success": False, "detail": "invalid JSON body"}, status_code=400)
+        if not isinstance(data, dict):
+            return JSONResponse({"success": False, "detail": "body must be object"}, status_code=400)
+        source = data.get("source") or ""
+        intensity = int(data.get("intensity") or 5)
+        intensity = max(1, min(5, intensity))
+        target = data.get("target") or "luau"
+        vm_strength = data.get("vm_strength") or "medium"
+        enable_vm = data.get("enable_vm", True)
+        enable_anti_tamper = data.get("enable_anti_tamper", True)
+        if not source or len(str(source).strip()) < 2:
             return JSONResponse({"success": False, "detail": "source too short"}, status_code=400)
-        if len(req.source) > 1_500_000:
-            return JSONResponse({"success": False, "detail": "source too large"}, status_code=400)
         t0 = time.time()
         try:
             eng = SkiObfuscator(
-                intensity=req.intensity,
-                target=req.target or "luau",
-                vm_strength=getattr(req,"vm_strength","medium"),
-                enable_vm=req.enable_vm,
-                enable_anti_tamper=req.enable_anti_tamper,
+                intensity=intensity,
+                target=target,
+                vm_strength=vm_strength if vm_strength in ("medium", "strong") else "medium",
+                enable_vm=bool(enable_vm),
+                enable_anti_tamper=bool(enable_anti_tamper),
             )
-            result = eng.obfuscate(req.source)
+            result = eng.obfuscate(str(source))
         except Exception as e:
-            return JSONResponse(
-                {"success": False, "detail": f"{type(e).__name__}: {e}"},
-                status_code=500,
-            )
+            return JSONResponse({"success": False, "detail": f"{type(e).__name__}: {e}"}, status_code=500)
         return {
             "success": True,
             "result": result,
             "stats": {
-                "original_size": len(req.source),
+                "original_size": len(str(source)),
                 "obfuscated_size": len(result),
-                "ratio": round(len(result) / max(1, len(req.source)), 2),
                 "time_ms": int((time.time() - t0) * 1000),
-                "intensity": req.intensity,
+                "intensity": intensity,
+                "vm_strength": eng.vm_strength,
             },
         }
 
